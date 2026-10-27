@@ -1,7 +1,7 @@
 
 # EcoAlert VES Web · 1.1
 
-Interfaz basada en el estilo de `andysarmientocruz2-sys/EcoAlert-VES`: fondo oscuro, verde y celeste, portada con teléfono, navegación adaptable y tarjetas. Conserva las pantallas y la configuración de Firebase del ZIP original.
+Interfaz basada en el estilo de `andysarmientocruz2-sys/EcoAlert-VES`: fondo oscuro, verde y celeste, portada con teléfono, navegación adaptable y tarjetas. Conserva las pantallas originales y usa el proyecto Firebase verificado en el APK.
 
 ## Abrir en Windows
 
@@ -26,15 +26,15 @@ Abre `http://localhost:4173/?demo=1`. Los reportes se guardan solo en este naveg
 
 ## GitHub y publicación
 
-Repositorio: [EcoAlert-VES-Web](https://github.com/andysarmientocruz2-sys/EcoAlert-VES-Web). Esta versión es independiente del repositorio de referencia `EcoAlert-VES`.
+Repositorio: [EcoAlert-VES-Web](https://github.com/andysarmientocruz2-sys/EcoAlert-VES-Web.io). Esta versión es independiente del repositorio de referencia `EcoAlert-VES`.
 
 El repositorio contiene el código fuente y excluye `node_modules/`, `dist/` y tus `.env`. Incluye los archivos de configuración que empiezan por punto. Tener el código en GitHub no publica automáticamente el sitio web. `pnpm-lock.yaml` fija las dependencias para instalaciones con pnpm. Para alojamiento estático, ejecuta `npm run build` y publica el contenido de `dist/`. Las rutas son relativas y la navegación usa `#/pantalla`.
 
 ## Firebase y las apps
 
-Se conserva la configuración pública de Firebase del proyecto original. Puedes sobrescribirla desde `.env.local` usando `.env.example` como referencia. Autoriza el dominio de publicación en Firebase Authentication para usar Google.
+Se usa la configuración pública de Firebase `ecoalert-ves` verificada en el APK. Consulta [AUTH_SETUP.md](AUTH_SETUP.md) para autorizar el dominio y revisar los pasos pendientes. Puedes sobrescribirla desde `.env.local` usando `.env.example` como referencia. Autoriza el dominio de publicación en Firebase Authentication para usar Google.
 
-No se han verificado la base de datos real, sus reglas ni la sincronización con APK/EXE: no se recibieron los proyectos de esas apps. Compartir un proyecto Firebase no basta; también deben coincidir colecciones, campos y permisos.
+Se inspeccionó el APK y se recibió un EXE compilado; aún faltan los proyectos fuente exactos y no se han verificado las reglas de base de datos ni la sincronización completa entre plataformas. Compartir un proyecto Firebase no basta; también deben coincidir colecciones, campos y permisos.
 
 ## Mejoras y límites
 

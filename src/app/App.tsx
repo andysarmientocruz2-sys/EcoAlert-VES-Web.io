@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { HowItWorks, MissionFooter } from "./components/LandingSections";
-import { FIREBASE_READY, auth, db, googleProvider } from "../lib/firebase";
+import { FIREBASE_READY, auth, db, googleProvider, config } from "../lib/firebase";
 import {
   onAuthStateChanged, signInWithPopup, signOut as fbSignOut,
   updateProfile,
@@ -8,7 +8,7 @@ import {
 } from "firebase/auth";
 import {
   collection, addDoc, onSnapshot, query, orderBy, limit,
-  serverTimestamp, doc, setDoc, getDoc, updateDoc, increment, deleteDoc,
+  runTransaction, serverTimestamp, doc, setDoc, getDoc, updateDoc, increment, deleteDoc,
 } from "firebase/firestore";
 import { motion } from "motion/react";
 import ecoAlertLogo from "../imports/Idk.jpeg";
@@ -2494,7 +2494,7 @@ function AdminPage({ liveReports = [] }: { liveReports?: SubmittedReport[] }) {
   const changeStatus = (id: string, status: ReportStatus) => {
     if (liveReports.some(r => r.id === id)) {
       setLiveStatuses(prev => ({ ...prev, [id]: status }));
-      if (db) updateDoc(doc(db, "reports", id), { status }).catch(() => {});
+      if (db) updateDoc(doc(db, "webReports", id), { status }).catch(() => {});
     } else {
       setStaticReports(prev => prev.map(r => r.id === id ? { ...r, status } : r));
     }
@@ -2686,7 +2686,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
 
   useEffect(() => {
     if (!db) return;
-    const q = query(collection(db, "reports", reportId, "comments"), orderBy("createdAt", "asc"), limit(50));
+    const q = query(collection(db, "webReports", reportId, "comments"), orderBy("createdAt", "asc"), limit(50));
     const unsub = onSnapshot(q, snap => {
       setComments(snap.docs.map(d => {
         const data = d.data();
@@ -2712,7 +2712,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
     setText("");
     try {
       if (db) {
-        await addDoc(collection(db, "reports", reportId, "comments"), {
+        await addDoc(collection(db, "webReports", reportId, "comments"), {
           text: commentText, userName: name, userPhoto: photo, createdAt: serverTimestamp(),
           userId: currentUser?.uid || null,
         });
@@ -2727,7 +2727,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
     if (!db || deleting) return;
     setDeleting(commentId);
     try {
-      await deleteDoc(doc(db, "reports", reportId, "comments", commentId));
+      await deleteDoc(doc(db, "webReports", reportId, "comments", commentId));
     } catch {} finally { setDeleting(null); }
   };
 
@@ -2818,7 +2818,7 @@ function CommunityPage({ reports, setPage, currentUser }: { reports: SubmittedRe
       return next;
     });
     setLocalUpvotes(u => ({ ...u, [id]: (u[id] ?? 0) + delta }));
-    if (db) updateDoc(doc(db, "reports", id), { upvotes: increment(delta) }).catch(() => {});
+    if (db) updateDoc(doc(db, "webReports", id), { upvotes: increment(delta) }).catch(() => {});
   };
 
   const toggleComments = (id: string) => setExpandedComments(prev => {
@@ -2971,8 +2971,13 @@ function AuthModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const currentDomain = typeof window !== "undefined" ? window.location.hostname : "";
 
-  const handleGoogleSignIn = async () => {
+  useEffect(() => {
     if (!auth) return;
+    return onAuthStateChanged(auth, session => { if (session) onClose(); });
+  }, [onClose]);
+
+  const handleGoogleSignIn = async () => {
+    if (!auth || loading) return;
     setLoading(true);
     setError("");
     try {
@@ -2982,9 +2987,15 @@ function AuthModal({ onClose }: { onClose: () => void }) {
       if (err.code === "auth/popup-closed-by-user" || err.code === "auth/cancelled-popup-request") {
         // user dismissed — no error needed
       } else if (err.code === "auth/unauthorized-domain") {
-        setError(`Dominio no autorizado. Ve a Firebase Console → Authentication → Authorized domains y añade: ${currentDomain}`);
+        setError(`Falta autorizar ${currentDomain} en Firebase → proyecto ${config.projectId} → Authentication → Configuración → Dominios autorizados.`);
       } else if (err.code === "auth/popup-blocked") {
         setError("El navegador bloqueó el popup. Permite popups para este sitio e intenta de nuevo.");
+      } else if (err.code === "auth/operation-not-allowed") {
+        setError("El proveedor Google todavía no está habilitado en Firebase Authentication.");
+      } else if (err.code === "auth/account-exists-with-different-credential") {
+        setError("Este correo ya tiene una cuenta con otro método. Entra con ese método en la app original antes de vincular Google; no crees otra cuenta.");
+      } else if (err.code === "auth/web-storage-unsupported") {
+        setError("Permite el almacenamiento del sitio y abre esta página en Chrome, Edge o Safari.");
       } else if (err.code === "auth/network-request-failed") {
         setError("Sin conexión a internet. Verifica tu conexión e intenta de nuevo.");
       } else {
@@ -3010,8 +3021,8 @@ function AuthModal({ onClose }: { onClose: () => void }) {
           </button>
           {!auth && (
             <div className="rounded-xl p-3 text-xs text-orange-700" style={{ backgroundColor: "#FFF3E0" }}>
-              <p className="font-semibold mb-1">⚠ Firebase no configurado</p>
-              <p>Para activar el inicio de sesión, configura las variables <span className="font-mono">VITE_FIREBASE_*</span> con los datos de tu proyecto Firebase.</p>
+              <p className="font-semibold mb-1">Modo de demostración</p>
+              <p>El inicio de sesión está desactivado en esta vista. <a className="underline" href={window.location.pathname + window.location.hash}>Abrir la versión con Google</a>.</p>
             </div>
           )}
           {error && (
@@ -3020,7 +3031,7 @@ function AuthModal({ onClose }: { onClose: () => void }) {
               <p>{error}</p>
             </div>
           )}
-          <p className="text-[11px] text-gray-400 text-center">Tu correo electrónico se vinculará para recibir avisos y anuncios de EcoAlert VES.</p>
+          <p className="text-[11px] text-gray-400 text-center">Usa la misma cuenta de Google que en EcoAlert móvil. Cada dispositivo mantiene su propia sesión.</p>
         </div>
         <div className="px-6 pb-5"><button onClick={onClose} className="w-full text-sm text-gray-400 hover:text-gray-600 py-2">Cancelar</button></div>
       </motion.div>
@@ -3047,7 +3058,7 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
 
   useEffect(() => {
     if (!user || !db) return;
-    getDoc(doc(db, "users", user.uid)).then(snap => {
+    getDoc(doc(db, "webProfiles", user.uid)).then(snap => {
       if (snap.exists() && snap.data().prefs) setPrefs(p => ({ ...p, ...snap.data().prefs }));
     }).catch(() => {});
   }, [user?.uid]);
@@ -3059,7 +3070,7 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
     if (!user || !db) return;
     setSaving(true);
     try {
-      await setDoc(doc(db, "users", user.uid), { name: user.name, email: user.email, photoUrl: user.photoUrl, prefs: next }, { merge: true });
+      await setDoc(doc(db, "webProfiles", user.uid), { name: user.name, email: user.email, photoUrl: user.photoUrl, prefs: next }, { merge: true });
       setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch {} finally { setSaving(false); }
   };
@@ -3069,7 +3080,7 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
     setProfileSaving(true);
     try {
       await updateProfile(auth.currentUser, { displayName: newName.trim() });
-      if (db) await setDoc(doc(db, "users", user.uid), { name: newName.trim() }, { merge: true });
+      if (db) await setDoc(doc(db, "webProfiles", user.uid), { name: newName.trim() }, { merge: true });
       setProfileSaved(true); setTimeout(() => setProfileSaved(false), 2000);
       setEditingName(false);
     } catch {} finally { setProfileSaving(false); }
@@ -3080,7 +3091,7 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
     setProfileSaving(true);
     try {
       await updateProfile(auth.currentUser, { photoURL: newPhotoUrl.trim() });
-      if (db) await setDoc(doc(db, "users", user.uid), { photoUrl: newPhotoUrl.trim() }, { merge: true });
+      if (db) await setDoc(doc(db, "webProfiles", user.uid), { photoUrl: newPhotoUrl.trim() }, { merge: true });
       setProfileSaved(true); setTimeout(() => setProfileSaved(false), 2000);
       setEditingPhoto(false); setNewPhotoUrl("");
     } catch {} finally { setProfileSaving(false); }
@@ -3455,7 +3466,14 @@ export default function App() {
         };
         setUser(u);
         if (db) {
-          setDoc(doc(db, "users", fbUser.uid), { name: fbUser.displayName, email: fbUser.email, photoUrl: fbUser.photoURL, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
+          // Match the native app's user schema; never reset existing points or achievements.
+          const profileRef = doc(db, "users", fbUser.uid);
+          runTransaction(db, async transaction => {
+            const snapshot = await transaction.get(profileRef);
+            const profile = { uid: fbUser.uid, displayName: fbUser.displayName || "Usuario", email: fbUser.email || "", photoURL: fbUser.photoURL || "" };
+            if (!snapshot.exists()) transaction.set(profileRef, { ...profile, ecoPoints: 0, level: 1, achievements: [], reportsCount: 0, createdAt: serverTimestamp() });
+            else transaction.set(profileRef, profile, { merge: true });
+          }).catch(() => { /* Authentication remains valid even if profile permissions deny the write. */ });
         }
       } else {
         setUser(null);
@@ -3484,7 +3502,7 @@ export default function App() {
     }
     // Real-time listener — fires immediately on login and on any change from any device
     const unsub = onSnapshot(
-      doc(db, "users", user.uid),
+      doc(db, "webProfiles", user.uid),
       (snap) => {
         if (snap.exists() && snap.data().stats) {
           const stats = snap.data().stats as UserStats;
@@ -3510,7 +3528,7 @@ export default function App() {
   // Firestore live reports listener
   useEffect(() => {
     if (!db) return;
-    const q = query(collection(db, "reports"), orderBy("timestamp", "desc"), limit(100));
+    const q = query(collection(db, "webReports"), orderBy("timestamp", "desc"), limit(100));
     const unsub = onSnapshot(q, snap => {
       setLiveReports(snap.docs.map(d => {
         const data = d.data();
@@ -3534,7 +3552,7 @@ export default function App() {
     const lsKey = user ? `eco_stats_${user.uid}` : "eco_stats_guest";
     try { localStorage.setItem(lsKey, JSON.stringify(stats)); } catch {}
     if (!user || !db) return;
-    setDoc(doc(db, "users", user.uid), { stats }, { merge: true }).catch(() => {});
+    setDoc(doc(db, "webProfiles", user.uid), { stats }, { merge: true }).catch(() => {});
   };
 
   const handleSignOut = async () => {
@@ -3553,7 +3571,7 @@ export default function App() {
       try {
         let imageUrl = r.imageUrl;
         if (imageUrl?.startsWith("data:")) imageUrl = await compressImage(imageUrl);
-        await addDoc(collection(db, "reports"), {
+        await addDoc(collection(db, "webReports"), {
           type: r.type, description: r.description, imageUrl,
           location: r.location, lat: r.lat, lng: r.lng,
           userName: r.userName, userPhoto: r.userPhoto,
