@@ -1,0 +1,3 @@
+# Sincronización de cuenta
+
+La web lee users/{uid}: ecoPoints, reportsCount y achievements. Los reportes nuevos se guardan en reports con el formato de las apps y en webReports para compatibilidad de comentarios. Reporte y recompensa se escriben en una transacción. La web lee reports en tiempo real. Firebase debe autorizar el dominio GitHub Pages y permitir estas operaciones al propietario autenticado. No se desplegaron reglas ni se probaron escrituras reales. No se migraron reportes históricos de webReports ni de accessacount. Misiones, cursos, comentarios y reacciones todavía requieren unificación. Las apps compiladas no fueron modificadas y su inicio Google continúa pendiente. No usar las recompensas del cliente para premios reales sin validación en servidor.

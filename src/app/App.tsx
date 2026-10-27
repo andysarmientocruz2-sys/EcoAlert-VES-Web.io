@@ -3502,10 +3502,12 @@ export default function App() {
     }
     // Real-time listener — fires immediately on login and on any change from any device
     const unsub = onSnapshot(
-      doc(db, "webProfiles", user.uid),
+      doc(db, "users", user.uid),
       (snap) => {
-        if (snap.exists() && snap.data().stats) {
-          const stats = snap.data().stats as UserStats;
+        if (snap.exists()) {
+          const data = snap.data();
+          const points = Number(data.ecoPoints) || 0;
+          const stats: UserStats = { ...DEFAULT_STATS, ...computeLevel(points), points, reports: Number(data.reportsCount) || 0, badges: data.achievements || [] };
           setUserStats(stats);
           try { localStorage.setItem(lsKey, JSON.stringify(stats)); } catch {}
         } else {
@@ -3516,6 +3518,7 @@ export default function App() {
         }
       },
       () => {
+        setSaveError("No se pudo sincronizar tu progreso con Firebase. Revisa la conexión y los permisos de tu cuenta.");
         try {
           const saved = localStorage.getItem(lsKey);
           setUserStats(saved ? JSON.parse(saved) : DEFAULT_STATS);
@@ -3528,21 +3531,21 @@ export default function App() {
   // Firestore live reports listener
   useEffect(() => {
     if (!db) return;
-    const q = query(collection(db, "webReports"), orderBy("timestamp", "desc"), limit(100));
+    const q = query(collection(db, "reports"), orderBy("createdAt", "desc"), limit(100));
     const unsub = onSnapshot(q, snap => {
       setLiveReports(snap.docs.map(d => {
         const data = d.data();
-        const ts = data.timestamp?.toDate?.() ?? new Date();
+        const ts = data.createdAt?.toDate?.() ?? new Date();
         return {
-          id: d.id, type: data.type, description: data.description, status: data.status || "pendiente",
+          id: d.id, type: data.type === "agua" ? "aguas" : data.type === "otro" ? "otros" : data.type, description: data.description, status: data.status === "revisado" ? "proceso" : data.status || "pendiente",
           imageUrl: data.imageUrl || null, location: data.location,
-          lat: data.lat ?? null, lng: data.lng ?? null,
+          lat: data.latitude ?? null, lng: data.longitude ?? null,
           date: ts.toLocaleDateString("es-PE", { day: "2-digit", month: "short", year: "numeric" }),
           time: ts.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
-          upvotes: data.upvotes ?? 0, userName: data.userName || "Anónimo", userPhoto: data.userPhoto || null,
+          upvotes: data.votes ?? 0, userName: data.userName || "Ciudadano", userPhoto: data.userPhoto || null,
         } as SubmittedReport;
       }));
-    }, () => {});
+    }, () => { setSaveError("No se pudieron cargar los reportes compartidos. Revisa los permisos de Firebase."); });
     return unsub;
   }, []);
 
@@ -3569,16 +3572,35 @@ export default function App() {
     // Save to Firestore or local
     if (db) {
       try {
+        if (!user) throw new Error("Inicia sesión para guardar en la nube");
         let imageUrl = r.imageUrl;
         if (imageUrl?.startsWith("data:")) imageUrl = await compressImage(imageUrl);
-        await addDoc(collection(db, "webReports"), {
+        const reportRef = doc(collection(db, "webReports"));
+        const profileRef = doc(db, "users", user.uid);
+        await runTransaction(db, async transaction => {
+          const profile = await transaction.get(profileRef);
+          if (!profile.exists()) throw new Error("Perfil pendiente de creación");
+          const data = profile.data();
+          const points = (Number(data.ecoPoints) || 0) + 50;
+          const reports = (Number(data.reportsCount) || 0) + 1;
+          transaction.set(reportRef, {
           type: r.type, description: r.description, imageUrl,
           location: r.location, lat: r.lat, lng: r.lng,
+          userId: user.uid,
           userName: r.userName, userPhoto: r.userPhoto,
           upvotes: 0, status: "pendiente", timestamp: serverTimestamp(),
+          });
+          transaction.set(doc(db, "reports", reportRef.id), {
+            userId: user.uid, title: r.description.slice(0, 100), description: r.description,
+            type: r.type === "aguas" ? "agua" : ["escombros", "otros"].includes(r.type) ? "otro" : r.type,
+            severity: "media", location: r.location, latitude: r.lat, longitude: r.lng,
+            imageUrl, userName: r.userName, userPhoto: r.userPhoto, status: "pendiente", votes: 0, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+            source: "web", webReportId: reportRef.id,
+          });
+          transaction.update(profileRef, { ecoPoints: points, reportsCount: reports, level: 1 + Math.floor(points / 100), updatedAt: serverTimestamp() });
         });
       } catch {
-        setSaveError("No se pudo guardar el reporte. Comprueba tu conexión e inténtalo de nuevo.");
+        setSaveError(user ? "No se pudo guardar el reporte y su progreso. Comprueba tu conexión y los permisos de Firebase." : "Inicia sesión con Google antes de guardar tu reporte en la nube.");
         setSavingReport(false);
         return;
       }
@@ -3600,7 +3622,7 @@ export default function App() {
     const newPoints = userStats.points + 50;
     const { level, levelNum } = computeLevel(newPoints);
     const newBadges = computeBadges({ ...userStats, reports: newReports, points: newPoints, level, levelNum });
-    await saveStats({ ...userStats, reports: newReports, points: newPoints, level, levelNum, badges: newBadges });
+    if (!db) await saveStats({ ...userStats, reports: newReports, points: newPoints, level, levelNum, badges: newBadges });
 
     setSavingReport(false);
     setPage("community");
