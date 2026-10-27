@@ -2494,7 +2494,7 @@ function AdminPage({ liveReports = [] }: { liveReports?: SubmittedReport[] }) {
   const changeStatus = (id: string, status: ReportStatus) => {
     if (liveReports.some(r => r.id === id)) {
       setLiveStatuses(prev => ({ ...prev, [id]: status }));
-      if (db) updateDoc(doc(db, "webReports", id), { status }).catch(() => {});
+      if (db) updateDoc(doc(db, "reports", id), { status: status === "proceso" ? "revisado" : status }).catch(() => { window.alert("No se pudo actualizar el estado. Revisa tus permisos."); });
     } else {
       setStaticReports(prev => prev.map(r => r.id === id ? { ...r, status } : r));
     }
@@ -2818,7 +2818,7 @@ function CommunityPage({ reports, setPage, currentUser }: { reports: SubmittedRe
       return next;
     });
     setLocalUpvotes(u => ({ ...u, [id]: (u[id] ?? 0) + delta }));
-    if (db) updateDoc(doc(db, "webReports", id), { upvotes: increment(delta) }).catch(() => {});
+    if (db) updateDoc(doc(db, "reports", id), { votes: increment(delta) }).catch(() => { window.alert("No se pudo guardar tu voto. Revisa tu conexión y tus permisos."); });
   };
 
   const toggleComments = (id: string) => setExpandedComments(prev => {
@@ -3545,9 +3545,9 @@ export default function App() {
           upvotes: data.votes ?? 0, userName: data.userName || "Ciudadano", userPhoto: data.userPhoto || null,
         } as SubmittedReport;
       }));
-    }, () => { setSaveError("No se pudieron cargar los reportes compartidos. Revisa los permisos de Firebase."); });
+    }, () => { setSaveError("No se pudieron cargar los reportes compartidos. Inicia sesión y revisa los permisos de Firebase."); });
     return unsub;
-  }, []);
+  }, [user?.uid]);
 
   // Save stats to Firestore + localStorage
   const saveStats = async (stats: UserStats) => {
