@@ -1,0 +1,16 @@
+// TEST FIXTURE ONLY. These are not the production rules and must not be deployed.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+    match /webProfiles/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+    match /reports/{id} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    }
+  }
+}

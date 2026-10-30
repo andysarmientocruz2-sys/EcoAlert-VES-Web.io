@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">EcoAlert VES</string>
+    <string name="title_activity_main">EcoAlert VES</string>
+    <string name="package_name">com.ecoalert.ves</string>
+    <string name="custom_url_scheme">com.ecoalert.ves</string>
+</resources>

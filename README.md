@@ -1,55 +1,34 @@
+# EcoAlert VES 1.3
 
-# EcoAlert VES Web · 1.1
+Web pública, fuente compartida con Windows y proyecto Android Capacitor.
 
-Interfaz basada en el estilo de `andysarmientocruz2-sys/EcoAlert-VES`: fondo oscuro, verde y celeste, portada con teléfono, navegación adaptable y tarjetas. Conserva las pantallas originales y usa el proyecto Firebase verificado en el APK.
+Web: https://andysarmientocruz2-sys.github.io/EcoAlert-VES-Web.io/
 
-## Abrir en Windows
+## Desarrollo
 
-1. Descarga y extrae el repositorio (Code → Download ZIP) o el paquete compilado en una carpeta.
-2. Necesitas Node.js 22 o superior instalado.
-3. Abre `INICIAR-ECOALERT.bat` con doble clic.
-
-El paquete compilado incluye `dist/`. La descarga desde GitHub contiene el código fuente: el iniciador instala las dependencias y compila la primera vez (requiere conexión a Internet). El iniciador sirve la web en `http://localhost:4173` y abre el navegador. No descarga dependencias mientras exista `dist/`. Deja abierta la ventana de comandos; Ctrl+C la detiene. No abras directamente `dist/index.html`.
-
-## Editar el código
+Node.js 22 o posterior. Desde esta carpeta:
 
 ```sh
-npm install
-npm run dev
+npm ci
+npm run build
+npm start
 ```
 
-Después de editar, ejecuta `npm run build` para actualizar la versión que abre el iniciador. `npm start` sirve la compilación en cualquier sistema con Node.js.
+La compilación comprueba TypeScript. npm start sirve dist en http://localhost:4173.
+?demo=1 activa datos locales, sin autenticación Firebase.
 
-## Probar sin Firebase
+## Pruebas
 
-Abre `http://localhost:4173/?demo=1`. Los reportes se guardan solo en este navegador y permanecen al recargar. No se envían a Firebase ni se sincronizan con otras apps.
+```sh
+npm test
+```
 
-## GitHub y publicación
+El test de integración se omite si no están activos los emuladores. Para ejecutarlo con datos aislados, usa Firebase CLI y Java compatibles:
 
-Repositorio: [EcoAlert-VES-Web](https://github.com/andysarmientocruz2-sys/EcoAlert-VES-Web.io). Esta versión es independiente del repositorio de referencia `EcoAlert-VES`.
+```sh
+firebase emulators:exec --project demo-ecoalert-sync --config tests/firebase.json --only auth,firestore "npm test"
+```
 
-El repositorio contiene el código fuente y excluye `node_modules/`, `dist/` y tus `.env`. Incluye los archivos de configuración que empiezan por punto. Tener el código en GitHub no publica automáticamente el sitio web. `pnpm-lock.yaml` fija las dependencias para instalaciones con pnpm. Para alojamiento estático, ejecuta `npm run build` y publica el contenido de `dist/`. Las rutas son relativas y la navegación usa `#/pantalla`.
+No despliegues tests/firestore.test.rules: es un fixture simplificado de pruebas. No representa ni valida las reglas del proyecto real.
 
-## Firebase y las apps
-
-Se usa la configuración pública de Firebase `ecoalert-ves` verificada en el APK. Consulta [AUTH_SETUP.md](AUTH_SETUP.md) para autorizar el dominio y revisar los pasos pendientes. Puedes sobrescribirla desde `.env.local` usando `.env.example` como referencia. Autoriza el dominio de publicación en Firebase Authentication para usar Google.
-
-Se inspeccionó el APK y se recibió un EXE compilado; aún faltan los proyectos fuente exactos y no se han verificado las reglas de base de datos ni la sincronización completa entre plataformas. Compartir un proyecto Firebase no basta; también deben coincidir colecciones, campos y permisos.
-
-## Mejoras y límites
-
-- Portada ampliada, pasos de uso, accesos a educación/retos/comunidad y pie de página.
-- Menú adaptable a tablets y móviles, etiquetas de accesibilidad, foco y contraste.
-- Navegación que conserva la pantalla al recargar y permite Atrás/Adelante.
-- Iniciador para Windows y servidor local limitado a la carpeta compilada.
-- Aviso visible si falla un reporte; los puntos se conceden después del guardado.
-- Pruebas locales persistidas en el navegador y texto escapado en popups del mapa.
-- React declarado como dependencia y retirada de React Leaflet 5, sin uso e incompatible con React 18.
-- Compilación separada en archivos para Firebase, mapas y gráficos.
-- La revisión usa reglas locales, no Gemini; no mide áreas ni diagnostica riesgos sanitarios.
-- Noticias, actividades, reportes de ejemplo y parte del panel Admin siguen siendo demostrativos. Admin conserva la lógica previa y no incorpora permisos de producción.
-
-Validado con compilación Vite, revisión TypeScript y navegación en el navegador. El `.bat` no se ejecutó en Windows y no se probó el inicio de sesión real con Google desde este entorno.
-  
-
-Prueba de extremo a extremo en modo local: foto, dirección manual, descripción, revisión, confirmación y persistencia del reporte tras recargar: correcta. Ningún reporte de prueba se envió a Firebase.
+Lee SYNC_STATUS.md para el alcance de la sincronización y README-ANDROID.md para compilar Android. El paquete descargable incluye el escritorio Electron y sus pruebas.

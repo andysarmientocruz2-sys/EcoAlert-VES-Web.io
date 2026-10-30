@@ -9,7 +9,7 @@ if errorlevel 1 (
 )
 if not exist "dist\index.html" (
   echo Preparando EcoAlert por primera vez...
-  call npm install --no-audit --no-fund
+  call npm ci
   if errorlevel 1 goto error
   call npm run build
   if errorlevel 1 goto error

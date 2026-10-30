@@ -1,14 +1,19 @@
+import { useSyncedActivity } from "../lib/use-synced-activity";
+import type { QuizProgress, QuizAction } from "../lib/activity-sync";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { HowItWorks, MissionFooter } from "./components/LandingSections";
 import { FIREBASE_READY, auth, db, googleProvider, config } from "../lib/firebase";
 import {
-  onAuthStateChanged, signInWithPopup, signOut as fbSignOut,
+  onAuthStateChanged, signOut as fbSignOut, getRedirectResult,
   updateProfile,
   type User as FbUser,
 } from "firebase/auth";
+import { prepareAuth, signInWithBestMethod, isNativeShell, nativePlatform } from "../lib/native-auth";
+import { buildReportDocs, mapCloudReport, displayLevel, NATIVE_LEVELS, mergeAchievements } from "../lib/progress";
+import { ensureAccount, watchAccount, watchPreferences, savePreference, saveReportAndProgress, DEFAULT_PREFERENCES } from "../lib/account-sync";
 import {
-  collection, addDoc, onSnapshot, query, orderBy, limit,
-  runTransaction, serverTimestamp, doc, setDoc, getDoc, updateDoc, increment, deleteDoc,
+  collection, addDoc, onSnapshot, query, orderBy, limit, where,
+  serverTimestamp, doc, setDoc, getDoc, updateDoc, increment, deleteDoc,
 } from "firebase/firestore";
 import { motion } from "motion/react";
 import ecoAlertLogo from "../imports/Idk.jpeg";
@@ -63,6 +68,7 @@ interface Report {
 
 interface SubmittedReport {
   id: string;
+  userId?: string;
   type: ReportType;
   description: string;
   imageUrl: string | null;
@@ -113,7 +119,7 @@ interface NewsItem {
 
 const DEFAULT_STATS: UserStats = {
   points: 0, reports: 0, resolved: 0,
-  badges: [], level: "Eco Novato", levelNum: 1,
+  badges: [], level: "Semilla", levelNum: 1,
 };
 
 // Hero slideshow — Lima / Peru city scenes from Unsplash
@@ -128,20 +134,10 @@ const HERO_IMAGES = [
 // ==================== HELPERS ====================
 
 function computeLevel(points: number): { level: string; levelNum: number } {
-  if (points >= 2500) return { level: "Eco Héroe", levelNum: 4 };
-  if (points >= 1500) return { level: "Eco Guardián", levelNum: 3 };
-  if (points >= 500) return { level: "Eco Protector", levelNum: 2 };
-  return { level: "Eco Novato", levelNum: 1 };
+  return displayLevel(points);
 }
-
 function computeBadges(stats: UserStats): string[] {
-  const badges = [...stats.badges];
-  const add = (b: string) => { if (!badges.includes(b)) badges.push(b); };
-  if (stats.reports >= 1) add("primer_reporte");
-  if (stats.reports >= 10) add("diez_reportes");
-  if (stats.resolved >= 5) add("resolutor");
-  if (stats.reports >= 3) add("activo");
-  return badges;
+  return mergeAchievements(stats.badges, { reports: stats.reports, points: stats.points });
 }
 
 // ==================== MOCK DATA ====================
@@ -493,6 +489,20 @@ const LEVEL_CONFIG: Record<string, { color: string; bg: string; nextPoints: numb
 const NEXT_LEVEL: Record<string, string> = {
   "Eco Novato": "Eco Protector", "Eco Protector": "Eco Guardián", "Eco Guardián": "Eco Héroe", "Eco Héroe": "Máximo",
 };
+
+// Canonical mobile/desktop levels, with legacy labels retained for example data.
+for (let i = 0; i < NATIVE_LEVELS.length; i++) {
+  const level = NATIVE_LEVELS[i];
+  LEVEL_CONFIG[level.name] = { color: "#4ADE80", bg: "rgba(74,222,128,0.12)", nextPoints: level.nextPoints };
+  NEXT_LEVEL[level.name] = NATIVE_LEVELS[i + 1]?.name || "Máximo";
+}
+Object.assign(BADGE_CONFIG, {
+  first_report: { ...BADGE_CONFIG.primer_reporte },
+  ten_reports: { ...BADGE_CONFIG.diez_reportes },
+  fifty_reports: { label: "50 reportes", desc: "Enviaste 50 reportes", icon: Target, color: "#2196F3" },
+  hundred_reports: { label: "100 reportes", desc: "Enviaste 100 reportes", icon: Shield, color: "#9C27B0" },
+  green_citizen: { label: "Ciudadano verde", desc: "Alcanzaste 500 puntos", icon: Leaf, color: "#4ADE80" },
+});
 
 // ==================== SHARED UI ====================
 
@@ -1818,13 +1828,13 @@ function CarbonCalcGame() {
   );
 }
 
-function AlertsPage() {
+function AlertsPage({ quiz, onQuiz, activityBusy, signedIn }: { quiz: QuizProgress; onQuiz: (action: QuizAction) => void; activityBusy: boolean; signedIn: boolean }) {
   const [joined, setJoined] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<"eventos" | "quiz" | "juegos" | "talleres">("eventos");
-  const [quizIdx, setQuizIdx] = useState(0);
-  const [quizScore, setQuizScore] = useState(0);
-  const [quizAns, setQuizAns] = useState<number | null>(null);
-  const [quizDone, setQuizDone] = useState(false);
+  const quizIdx = quiz.index;
+  const quizAns = quiz.answers[quizIdx] ?? null;
+  const quizDone = quiz.done;
+  const quizScore = quiz.answers.reduce((sum, answer, i) => sum + (answer === ECO_QUIZ[i]?.correct ? 1 : 0), 0);
   const [expandedWorkshop, setExpandedWorkshop] = useState<number | null>(null);
   const [liveParticipants, setLiveParticipants] = useState<Record<string, number>>({});
   const [activeGame, setActiveGame] = useState<"sort" | "carbon" | null>(null);
@@ -1855,16 +1865,9 @@ function AlertsPage() {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
-  const handleQuizAnswer = (idx: number) => {
-    if (quizAns !== null) return;
-    setQuizAns(idx);
-    if (idx === ECO_QUIZ[quizIdx].correct) setQuizScore(s => s + 1);
-  };
-  const nextQuestion = () => {
-    if (quizIdx + 1 >= ECO_QUIZ.length) { setQuizDone(true); return; }
-    setQuizIdx(i => i + 1); setQuizAns(null);
-  };
-  const resetQuiz = () => { setQuizIdx(0); setQuizScore(0); setQuizAns(null); setQuizDone(false); };
+  const handleQuizAnswer = (choice: number) => onQuiz({ type: "answer", question: quizIdx, choice });
+  const nextQuestion = () => onQuiz({ type: "next", question: quizIdx });
+  const resetQuiz = () => onQuiz({ type: "reset" });
 
   const getCountdown = (dateStr: string) => {
     const target = new Date(dateStr + "T07:00:00");
@@ -1884,7 +1887,7 @@ function AlertsPage() {
     <div className="min-h-screen bg-background pb-8">
       <div className="text-white px-4 py-6" style={{ background: "linear-gradient(135deg, #4ADE80, #388E3C)" }}>
         <h1 className="text-2xl font-bold">Alertas Ecológicas</h1>
-        <p className="text-white/70 text-sm">Eventos en vivo · mini-juegos · talleres ambientales</p>
+        <p className="text-white/70 text-sm">Actividades de ejemplo · inscripciones y juegos de demostración</p>
       </div>
       <div className="bg-card border-b border-border sticky top-14 z-30">
         <div className="max-w-2xl mx-auto px-4 flex gap-0.5 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
@@ -1926,7 +1929,7 @@ function AlertsPage() {
                       <Users className="w-3 h-3" />
                       <span className="font-semibold" style={{ color: cfg.color }}>{participants + (isJoined ? 1 : 0)}</span>
                       <span>participantes</span>
-                      {!countdown.past && <span className="text-green-500 animate-pulse">● en vivo</span>}
+                      {!countdown.past && <span className="text-green-500 animate-pulse">● demostración</span>}
                     </span>
                     <span>{alert.maxParticipants} cupos</span>
                   </div>
@@ -1948,6 +1951,7 @@ function AlertsPage() {
         })}
 
         {/* QUIZ */}
+        {tab === "quiz" && <p className="text-xs text-muted-foreground" role="status">{activityBusy ? "Cargando o guardando tu avance…" : signedIn ? "Tu avance se guarda en tu cuenta para continuar en web y apps." : "Avance guardado en este dispositivo. Inicia sesión para usar la nube."}</p>}
         {tab === "quiz" && (
           <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="bg-card rounded-2xl shadow-sm border border-border overflow-hidden">
             <div className="p-5 text-white" style={{ background: "linear-gradient(135deg, #1565C0, #00D4FF)" }}>
@@ -1961,7 +1965,7 @@ function AlertsPage() {
                   <div className="text-5xl mb-3">{quizScore >= 7 ? "🏆" : quizScore >= 5 ? "🌿" : quizScore >= 3 ? "📚" : "🌱"}</div>
                   <h3 className="text-xl font-bold text-gray-900 mb-1">{quizScore} / {ECO_QUIZ.length} correctas</h3>
                   <p className="text-sm text-gray-500 mb-6">{quizScore >= 7 ? "¡Experto ambiental! Tus vecinos te necesitan" : quizScore >= 5 ? "Buen conocimiento, sigue aprendiendo" : quizScore >= 3 ? "Explorar la sección Aprende te ayudará" : "¡Comienza por los artículos básicos!"}</p>
-                  <button onClick={resetQuiz} className="px-6 py-3 rounded-xl font-semibold text-white text-sm" style={{ backgroundColor: "#4ADE80" }}>Jugar de nuevo</button>
+                  <button disabled={activityBusy} onClick={resetQuiz} className="px-6 py-3 rounded-xl font-semibold text-white text-sm" style={{ backgroundColor: "#4ADE80" }}>Jugar de nuevo</button>
                 </div>
               ) : (
                 <>
@@ -1976,7 +1980,7 @@ function AlertsPage() {
                       if (revealed && isCorrect) { bg = "rgba(74,222,128,0.12)"; color = "#4ADE80"; border = "#4CAF50"; }
                       else if (revealed && isSelected && !isCorrect) { bg = "#FFEBEE"; color = "#D32F2F"; border = "#EF5350"; }
                       return (
-                        <button key={i} onClick={() => handleQuizAnswer(i)} disabled={revealed} className="w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-all border-2" style={{ backgroundColor: bg, color, borderColor: border }}>
+                        <button key={i} disabled={activityBusy || quizAns !== null} onClick={() => handleQuizAnswer(i)} className="w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-all border-2" style={{ backgroundColor: bg, color, borderColor: border }}>
                           {revealed && isCorrect && "✓ "}{revealed && isSelected && !isCorrect && "✗ "}{opt}
                         </button>
                       );
@@ -1990,7 +1994,7 @@ function AlertsPage() {
                         </p>
                         <p className="text-xs text-gray-600">{ECO_QUIZ[quizIdx].exp}</p>
                       </div>
-                      <button onClick={nextQuestion} className="w-full py-3 rounded-xl font-semibold text-white text-sm" style={{ backgroundColor: "#4ADE80" }}>
+                      <button disabled={activityBusy} onClick={nextQuestion} className="w-full py-3 rounded-xl font-semibold text-white text-sm" style={{ backgroundColor: "#4ADE80" }}>
                         {quizIdx + 1 >= ECO_QUIZ.length ? "Ver resultados" : "Siguiente →"}
                       </button>
                     </motion.div>
@@ -2137,7 +2141,7 @@ function GamificationPage({ userStats, user }: { userStats: UserStats; user: Goo
             <motion.div initial={{ width: 0 }} animate={{ width: `${Math.min(progressPct, 100)}%` }} transition={{ duration: 1.5, ease: "easeOut" }} className="h-3 rounded-full" style={{ background: `linear-gradient(90deg, ${lvlCfg.color}, #FFA726)` }} />
           </div>
           <div className="text-xs text-center text-gray-400">
-            {me.level !== "Eco Héroe" ? `${(lvlCfg.nextPoints - me.points).toLocaleString()} puntos para ${NEXT_LEVEL[me.level]}` : "¡Nivel máximo alcanzado! 🏆"}
+            {!["Eco Héroe", "EcoLeyenda"].includes(me.level) ? `${(lvlCfg.nextPoints - me.points).toLocaleString()} puntos para ${NEXT_LEVEL[me.level]}` : "¡Nivel máximo alcanzado! 🏆"}
           </div>
           <div className="grid grid-cols-2 gap-3 mt-4">
             <div className="rounded-xl p-3 text-center" style={{ backgroundColor: "rgba(74,222,128,0.12)" }}>
@@ -2155,9 +2159,7 @@ function GamificationPage({ userStats, user }: { userStats: UserStats; user: Goo
             <div className="text-xs font-semibold text-gray-700 mb-2">¿Cómo ganar puntos?</div>
             <div className="space-y-1.5">
               {[
-                { action: "Enviar un reporte verificado", pts: "+50 pts" },
-                { action: "Tu reporte llega a 'Resuelto'", pts: "+30 pts" },
-                { action: "Apoyar un reporte de otro ciudadano", pts: "+5 pts" },
+                { action: "Guardar un reporte", pts: "+50 pts" },
               ].map(row => (
                 <div key={row.action} className="flex items-center justify-between text-xs">
                   <span className="text-gray-600">{row.action}</span>
@@ -2263,7 +2265,7 @@ function GamificationPage({ userStats, user }: { userStats: UserStats; user: Goo
 
 // ==================== EDUCATION PAGE ====================
 
-function EducationPage() {
+function EducationPage({ readArticles, onRead }: { readArticles: string[]; onRead: (id: string) => void }) {
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState<ArticleCategory | "all">("all");
   const [selected, setSelected] = useState<Article | null>(null);
@@ -2293,6 +2295,8 @@ function EducationPage() {
             <span className="text-xs text-gray-400">{selected.readTime} min de lectura · {selected.date}</span>
           </div>
           <h1 className="text-xl font-bold text-gray-900 mb-3 leading-snug">{selected.title}</h1>
+          <button className="text-sm underline mb-3" disabled={readArticles.includes(selected.id)} onClick={() => onRead(selected.id)}>{readArticles.includes(selected.id) ? "✓ Lectura guardada" : "Marcar como leído"}</button>
+          <p className="text-xs text-amber-700 mb-3">Lectura de demostración. Los datos, fechas y servicios de este ejemplo requieren verificación en las fuentes oficiales.</p>
           <p className="text-gray-600 text-sm mb-5 leading-relaxed">{selected.summary}</p>
           <div className="rounded-xl p-5 text-sm text-gray-700 leading-relaxed space-y-3" style={{ backgroundColor: "rgba(74,222,128,0.12)" }}>
             {({
@@ -2365,8 +2369,8 @@ function EducationPage() {
     <div className="min-h-screen bg-background pb-8">
       <div className="text-white px-4 pb-5 pt-6" style={{ background: "linear-gradient(135deg, #1565C0, #00D4FF)" }}>
         <h1 className="text-2xl font-bold mb-1">Educación Ambiental</h1>
-        <p className="text-white/70 text-sm mb-1">Artículos actualizados cada semana · VES, Lima, Perú</p>
-        <p className="text-white/50 text-xs mb-4">Semana del 25 al 31 de agosto, 2026 · Fuentes verificadas</p>
+        <p className="text-white/70 text-sm mb-1">Lecturas de demostración · VES, Lima, Perú</p>
+        <p className="text-white/50 text-xs mb-4">Ejemplos sin verificación editorial: consulta las fuentes oficiales para datos, fechas y servicios actuales.</p>
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -2416,6 +2420,7 @@ function EducationPage() {
                     <span className="text-xs text-gray-400">{article.readTime} min</span>
                   </div>
                   <h3 className="font-semibold text-gray-900 text-sm mb-1.5 leading-snug">{article.title}</h3>
+                  {readArticles.includes(article.id) && <span className="text-xs text-green-700">✓ Leído</span>}
                   <p className="text-xs text-gray-500 line-clamp-2 mb-3">{article.summary}</p>
                   <div className="flex items-center gap-3 text-xs text-gray-400">
                     <div className="flex items-center gap-1"><Eye className="w-3 h-3" />{article.views.toLocaleString()}</div>
@@ -2481,7 +2486,7 @@ function AdminPage({ liveReports = [] }: { liveReports?: SubmittedReport[] }) {
   const liveAsAdmin: Report[] = liveReports.map(r => ({
     id: r.id, type: r.type,
     severity: (() => { const sev = ["quema", "aguas"].includes(r.type) ? "alto" : ["escombros", "aire"].includes(r.type) ? "medio" : "bajo"; return sev as Severity; })(),
-    status: liveStatuses[r.id] || "pendiente",
+    status: liveStatuses[r.id] || r.status || "pendiente",
     description: r.description, location: r.location,
     sector: "Villa El Salvador", date: r.date,
     user: r.userName, votes: r.upvotes,
@@ -2657,6 +2662,7 @@ function AdminPage({ liveReports = [] }: { liveReports?: SubmittedReport[] }) {
 
 interface ReportComment {
   id: string;
+  userId?: string;
   text: string;
   userName: string;
   userPhoto: string | null;
@@ -2692,11 +2698,11 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
         const data = d.data();
         const ts = data.createdAt?.toDate?.() ?? new Date();
         return {
-          id: d.id,
+          id: d.id, userId: data.userId,
           text: data.text,
           userName: data.userName || "Anónimo",
           userPhoto: data.userPhoto || null,
-          createdAt: ts.toLocaleString("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }),
+          createdAt: ts.toISOString(),
         };
       }));
     }, () => {});
@@ -2704,12 +2710,11 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
   }, [reportId]);
 
   const sendComment = async () => {
-    if (!text.trim() || sending) return;
+    if (!text.trim() || text.trim().length > 1000 || sending || !currentUser) return;
     setSending(true);
     const name = currentUser?.name || "Ciudadano anónimo";
     const photo = currentUser?.photoUrl || null;
     const commentText = text.trim();
-    setText("");
     try {
       if (db) {
         await addDoc(collection(db, "webReports", reportId, "comments"), {
@@ -2719,8 +2724,9 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
       } else {
         setComments(prev => [...prev, { id: Date.now().toString(), text: commentText, userName: name, userPhoto: photo, createdAt: new Date().toISOString() }]);
       }
+      setText("");
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-    } catch {} finally { setSending(false); }
+    } catch { window.alert("No se pudo guardar el comentario. Conservamos tu texto para que puedas reintentar."); } finally { setSending(false); }
   };
 
   const deleteComment = async (commentId: string) => {
@@ -2728,7 +2734,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
     setDeleting(commentId);
     try {
       await deleteDoc(doc(db, "webReports", reportId, "comments", commentId));
-    } catch {} finally { setDeleting(null); }
+    } catch { window.alert("No se pudo eliminar el comentario. Comprueba tu conexión y tus permisos."); } finally { setDeleting(null); }
   };
 
   return (
@@ -2745,7 +2751,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
       {comments.length > 0 && (
         <div className="space-y-3 mb-4 max-h-72 overflow-y-auto pr-1" style={{ scrollbarWidth: "thin" }}>
           {comments.map(c => {
-            const isOwn = currentUser?.name === c.userName || (currentUser?.uid && (c as any).userId === currentUser.uid);
+            const isOwn = Boolean(currentUser?.uid && c.userId === currentUser.uid);
             return (
               <motion.div key={c.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex items-start gap-2.5 group">
                 {c.userPhoto
@@ -2785,7 +2791,7 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
         }
         <div className="flex-1 flex items-center gap-2 bg-gray-100 rounded-2xl px-3 py-2">
           <input
-            ref={inputRef} value={text}
+            ref={inputRef} value={text} maxLength={1000}
             onChange={e => setText(e.target.value)}
             onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendComment()}
             placeholder={currentUser ? "Escribe un comentario…" : "Inicia sesión para comentar"}
@@ -2802,23 +2808,34 @@ function CommentSection({ reportId, currentUser }: { reportId: string; currentUs
 }
 
 function CommunityPage({ reports, setPage, currentUser }: { reports: SubmittedReport[]; setPage: (p: Page) => void; currentUser: GoogleUser | null }) {
-  const [upvoted, setUpvoted] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("eco_upvoted") || "[]")); } catch { return new Set(); }
-  });
+  const voteKey = `eco_upvoted_${currentUser?.uid || "guest"}`;
+  const [upvoted, setUpvoted] = useState<Set<string>>(new Set());
   const [localUpvotes, setLocalUpvotes] = useState<Record<string, number>>({});
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
+  const voting = useRef(new Set<string>());
+  useEffect(() => {
+    try { setUpvoted(new Set(JSON.parse(localStorage.getItem(voteKey) || "[]"))); }
+    catch { setUpvoted(new Set()); }
+    setLocalUpvotes({});
+  }, [voteKey]);
 
-  const toggleUpvote = (id: string) => {
+  const toggleUpvote = async (id: string) => {
+    if (db && !currentUser) { window.alert("Inicia sesión para apoyar un reporte."); return; }
+    if (voting.current.has(id)) return;
+    voting.current.add(id);
     const isUpvoted = upvoted.has(id);
     const delta = isUpvoted ? -1 : 1;
-    setUpvoted(prev => {
-      const next = new Set(prev);
-      isUpvoted ? next.delete(id) : next.add(id);
-      try { localStorage.setItem("eco_upvoted", JSON.stringify([...next])); } catch {}
-      return next;
-    });
-    setLocalUpvotes(u => ({ ...u, [id]: (u[id] ?? 0) + delta }));
-    if (db) updateDoc(doc(db, "reports", id), { votes: increment(delta) }).catch(() => { window.alert("No se pudo guardar tu voto. Revisa tu conexión y tus permisos."); });
+    try {
+      if (db) await updateDoc(doc(db, "reports", id), { votes: increment(delta) });
+      else setLocalUpvotes(u => ({ ...u, [id]: (u[id] ?? 0) + delta }));
+      setUpvoted(prev => {
+        const next = new Set(prev);
+        isUpvoted ? next.delete(id) : next.add(id);
+        try { localStorage.setItem(voteKey, JSON.stringify([...next])); } catch {}
+        return next;
+      });
+    } catch { window.alert("No se pudo guardar tu voto. Revisa tu conexión y tus permisos."); }
+    finally { voting.current.delete(id); }
   };
 
   const toggleComments = (id: string) => setExpandedComments(prev => {
@@ -2905,50 +2922,22 @@ function CommunityPage({ reports, setPage, currentUser }: { reports: SubmittedRe
 // ==================== FIREBASE HELPERS ====================
 
 async function compressImage(dataUrl: string, maxPx = 480): Promise<string> {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
+      try {
       const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(img.width * scale); canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", 0.6));
+      const encoded = canvas.toDataURL("image/jpeg", 0.6);
+      if (encoded.length > 700000) throw new Error("Imagen demasiado grande");
+      resolve(encoded);
+      } catch (error) { reject(error); }
     };
-    img.onerror = () => resolve(dataUrl);
+    img.onerror = () => reject(new Error("La imagen no se pudo leer"));
     img.src = dataUrl;
   });
-}
-
-function FirebaseSetupScreen() {
-  return (
-    <div className="fixed inset-0 z-[999] bg-white flex items-center justify-center p-6">
-      <div className="max-w-md w-full">
-        <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ backgroundColor: "#FFF3E0" }}><Settings className="w-8 h-8" style={{ color: "#FBBF24" }} /></div>
-        <h2 className="text-2xl font-bold text-gray-900 text-center mb-3">Configura Firebase</h2>
-        <p className="text-sm text-gray-500 text-center mb-6">Para activar el inicio de sesión real con Google y reportes en tiempo real, necesitas un proyecto Firebase con el dominio de esta app autorizado.</p>
-        <div className="bg-gray-50 rounded-xl p-4 mb-5 space-y-3 text-sm">
-          <p className="font-semibold text-gray-700">Pasos:</p>
-          <ol className="list-decimal list-inside space-y-1.5 text-gray-600">
-            <li>Crea un proyecto en <span className="font-mono text-xs bg-gray-200 px-1 rounded">console.firebase.google.com</span></li>
-            <li>Authentication → Sign-in method → habilita <b>Google</b></li>
-            <li>Authentication → Authorized domains → agrega <b>este dominio</b></li>
-            <li>Firestore Database → Crear base de datos</li>
-            <li>Configuración → Web app → copia la config a variables de entorno</li>
-          </ol>
-        </div>
-        <div className="bg-gray-900 rounded-xl p-4 mb-5 text-xs font-mono text-green-400 space-y-1">
-          <p className="text-gray-400">{"// Firestore Rules (desarrollo)"}</p>
-          <p>{"rules_version = '2';"}</p>
-          <p>{"service cloud.firestore {"}</p>
-          <p>{"  match /databases/{db}/documents {"}</p>
-          <p>{"    match /{doc=**} { allow read, write: if true; }"}</p>
-          <p>{"  }"}</p>
-          <p>{"}"}</p>
-        </div>
-        <p className="text-xs text-gray-400 text-center">Las variables <span className="font-mono">VITE_FIREBASE_*</span> ya están listas — solo ingresa los valores de tu proyecto.</p>
-      </div>
-    </div>
-  );
 }
 
 // ==================== AUTH ====================
@@ -2981,7 +2970,7 @@ function AuthModal({ onClose }: { onClose: () => void }) {
     setLoading(true);
     setError("");
     try {
-      await signInWithPopup(auth, googleProvider);
+      await signInWithBestMethod(auth, googleProvider);
       onClose();
     } catch (err: any) {
       if (err.code === "auth/popup-closed-by-user" || err.code === "auth/cancelled-popup-request") {
@@ -3031,7 +3020,7 @@ function AuthModal({ onClose }: { onClose: () => void }) {
               <p>{error}</p>
             </div>
           )}
-          <p className="text-[11px] text-gray-400 text-center">Usa la misma cuenta de Google que en EcoAlert móvil. Cada dispositivo mantiene su propia sesión.</p>
+          <p className="text-[11px] text-gray-400 text-center">{nativePlatform() === "android" ? "Selecciona tu cuenta de Google para recuperar tu progreso." : isNativeShell() ? "Se abre el navegador del sistema y la sesión vuelve a esta aplicación." : "Usa la misma cuenta de Google en web, Windows y Android. Cada dispositivo inicia sesión por separado."}</p>
         </div>
         <div className="px-6 pb-5"><button onClick={onClose} className="w-full text-sm text-gray-400 hover:text-gray-600 py-2">Cancelar</button></div>
       </motion.div>
@@ -3041,12 +3030,12 @@ function AuthModal({ onClose }: { onClose: () => void }) {
 
 // ==================== ACCOUNT PAGE ====================
 
-function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, theme, setTheme }: {
+function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, theme, setTheme, onProfileChanged }: {
   user: GoogleUser | null; reports: SubmittedReport[]; userStats: UserStats;
   onSignOut: () => void; onSignIn: () => void; setPage: (p: Page) => void;
-  theme: Theme; setTheme: (t: Theme) => void;
+  theme: Theme; setTheme: (t: Theme) => void; onProfileChanged: (user: GoogleUser) => void;
 }) {
-  const [prefs, setPrefs] = useState({ notifications: true, publicProfile: true, emailNews: true });
+  const [prefs, setPrefs] = useState(DEFAULT_PREFERENCES);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -3058,46 +3047,54 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
 
   useEffect(() => {
     if (!user || !db) return;
-    getDoc(doc(db, "webProfiles", user.uid)).then(snap => {
-      if (snap.exists() && snap.data().prefs) setPrefs(p => ({ ...p, ...snap.data().prefs }));
-    }).catch(() => {});
+    return watchPreferences(db, user.uid, setPrefs, () => {
+      window.alert("No se pudieron cargar tus preferencias de la nube. Revisa la conexión y los permisos.");
+    });
   }, [user?.uid]);
 
   useEffect(() => { setNewName(user?.name || ""); }, [user?.name]);
 
   const togglePref = async (key: keyof typeof prefs) => {
+    if (saving) return;
+    const previous = prefs;
     const next = { ...prefs, [key]: !prefs[key] }; setPrefs(next);
     if (!user || !db) return;
     setSaving(true);
     try {
-      await setDoc(doc(db, "webProfiles", user.uid), { name: user.name, email: user.email, photoUrl: user.photoUrl, prefs: next }, { merge: true });
+      await savePreference(db, user.uid, key, next[key]);
       setSaved(true); setTimeout(() => setSaved(false), 2000);
-    } catch {} finally { setSaving(false); }
+    } catch { setPrefs(previous); window.alert("No se pudieron guardar las preferencias. Vuelve a intentarlo."); } finally { setSaving(false); }
   };
 
   const saveProfileName = async () => {
     if (!user || !auth?.currentUser || !newName.trim()) return;
     setProfileSaving(true);
     try {
+      if (db) await updateDoc(doc(db, "users", user.uid), { displayName: newName.trim(), updatedAt: serverTimestamp() });
       await updateProfile(auth.currentUser, { displayName: newName.trim() });
+      onProfileChanged({ ...user, name: newName.trim() });
       if (db) await setDoc(doc(db, "webProfiles", user.uid), { name: newName.trim() }, { merge: true });
       setProfileSaved(true); setTimeout(() => setProfileSaved(false), 2000);
       setEditingName(false);
-    } catch {} finally { setProfileSaving(false); }
+    } catch { window.alert("No se pudo guardar el perfil completo. Revisa la conexión y vuelve a intentarlo."); } finally { setProfileSaving(false); }
   };
 
   const saveProfilePhoto = async () => {
     if (!user || !auth?.currentUser || !newPhotoUrl.trim()) return;
+    try { if (new URL(newPhotoUrl.trim()).protocol !== "https:") throw new Error(); }
+    catch { window.alert("Usa una dirección HTTPS válida para tu foto."); return; }
     setProfileSaving(true);
     try {
+      if (db) await updateDoc(doc(db, "users", user.uid), { photoURL: newPhotoUrl.trim(), updatedAt: serverTimestamp() });
       await updateProfile(auth.currentUser, { photoURL: newPhotoUrl.trim() });
+      onProfileChanged({ ...user, photoUrl: newPhotoUrl.trim() });
       if (db) await setDoc(doc(db, "webProfiles", user.uid), { photoUrl: newPhotoUrl.trim() }, { merge: true });
       setProfileSaved(true); setTimeout(() => setProfileSaved(false), 2000);
       setEditingPhoto(false); setNewPhotoUrl("");
-    } catch {} finally { setProfileSaving(false); }
+    } catch { window.alert("No se pudo guardar el perfil completo. Revisa la conexión y vuelve a intentarlo."); } finally { setProfileSaving(false); }
   };
 
-  const myReports = reports.filter(r => r.userName === user?.name);
+  const myReports = reports.filter(r => r.userId === user?.uid);
 
   if (!user) {
     return (
@@ -3276,7 +3273,7 @@ function AccountPage({ user, reports, userStats, onSignOut, onSignIn, setPage, t
           <div className="p-4 space-y-3">
             {[
               { label: "Puntos ganados por reportes", value: `${userStats.reports * 50} pts`, pct: Math.min(100, (userStats.reports * 50 / Math.max(userStats.points, 1)) * 100), color: "#4ADE80" },
-              { label: "Apoyos dados a la comunidad", value: (() => { try { return JSON.parse(localStorage.getItem("eco_upvoted") || "[]").length; } catch { return 0; } })() + " apoyos", pct: Math.min(100, (() => { try { return JSON.parse(localStorage.getItem("eco_upvoted") || "[]").length * 10; } catch { return 0; } })()), color: "#FBBF24" },
+              { label: "Apoyos dados a la comunidad", value: (() => { try { return JSON.parse(localStorage.getItem(`eco_upvoted_${user.uid}`) || "[]").length; } catch { return 0; } })() + " apoyos", pct: Math.min(100, (() => { try { return JSON.parse(localStorage.getItem(`eco_upvoted_${user.uid}`) || "[]").length * 10; } catch { return 0; } })()), color: "#FBBF24" },
               { label: "Nivel de actividad", value: userStats.points >= 500 ? "Alto" : userStats.points >= 100 ? "Medio" : "Inicial", pct: Math.min(100, (userStats.points / 500) * 100), color: "#00D4FF" },
             ].map(item => (
               <div key={item.label}>
@@ -3357,7 +3354,7 @@ function Navbar({ currentPage, setPage, user, onSignIn }: { currentPage: Page; s
             <span className="font-bold text-base tracking-tight"><span style={{ color: "#4ADE80" }}>Eco</span><span style={{ color: "#00D4FF" }}>Alert</span><span className="text-gray-800"> VES</span></span>
           </button>
           <div className="hidden xl:flex items-center gap-0.5 flex-1 mx-2">
-            {NAV_ITEMS.map(item => {
+            {NAV_ITEMS.filter(item => item.key !== "admin" || !db).map(item => {
               const Icon = item.icon; const active = currentPage === item.key;
               return (
                 <button aria-current={active ? "page" : undefined} key={item.key} onClick={() => setPage(item.key)} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors" style={active ? { backgroundColor: "rgba(74,222,128,0.12)", color: "#4ADE80" } : { color: "var(--muted-foreground)" }}>
@@ -3385,7 +3382,7 @@ function Navbar({ currentPage, setPage, user, onSignIn }: { currentPage: Page; s
         </div>
         {open && (
           <motion.div id="eco-mobile-menu" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} className="xl:hidden bg-card border-t border-border px-4 py-3 grid grid-cols-4 gap-1.5">
-            {NAV_ITEMS.map(item => {
+            {NAV_ITEMS.filter(item => item.key !== "admin" || !db).map(item => {
               const Icon = item.icon; const active = currentPage === item.key;
               return (
                 <button aria-current={active ? "page" : undefined} key={item.key} onClick={() => { setPage(item.key); setOpen(false); }} className="flex flex-col items-center gap-1 p-2.5 rounded-xl text-[10px] font-semibold transition-colors" style={active ? { backgroundColor: "rgba(74,222,128,0.12)", color: "#4ADE80" } : { color: "#888" }}>
@@ -3423,11 +3420,17 @@ export default function App() {
     if (db) return [];
     try { return JSON.parse(localStorage.getItem("eco_local_reports") || "[]"); } catch { return []; }
   });
+  const [ownReports, setOwnReports] = useState<SubmittedReport[]>([]);
   const [saveError, setSaveError] = useState("");
   const [savingReport, setSavingReport] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
   const [authReady, setAuthReady] = useState(!FIREBASE_READY);
   const [user, setUser] = useState<GoogleUser | null>(null);
+  const [syncState, setSyncState] = useState<"loading" | "synced" | "pending" | "cached" | "error">("loading");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [syncRetry, setSyncRetry] = useState(0);
+  const reportAttempt = useRef<{ draft: string; id: string } | null>(null);
+  const activity = useSyncedActivity(db, user?.uid, ECO_QUIZ.length, setSaveError);
   const [userStats, setUserStats] = useState<UserStats>(DEFAULT_STATS);
   const [theme, setThemeState] = useState<Theme>(() => {
     try { return (localStorage.getItem("eco_theme") as Theme) || "dark"; } catch { return "dark"; }
@@ -3453,9 +3456,23 @@ export default function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
+
   // Firebase auth listener
   useEffect(() => {
     if (!auth) { setAuthReady(true); return; }
+    prepareAuth(auth).catch(() => {
+      setSaveError("No se pudo conservar la sesión. Permite el almacenamiento de la aplicación y vuelve a intentarlo.");
+    }).then(() => {
+      if (!isNativeShell()) return getRedirectResult(auth).catch(() => {
+        setSaveError("No se pudo terminar el acceso de Google. Pulsa Iniciar sesión de nuevo.");
+      });
+    });
     const unsub = onAuthStateChanged(auth, (fbUser: FbUser | null) => {
       if (fbUser) {
         const u: GoogleUser = {
@@ -3466,14 +3483,10 @@ export default function App() {
         };
         setUser(u);
         if (db) {
-          // Match the native app's user schema; never reset existing points or achievements.
-          const profileRef = doc(db, "users", fbUser.uid);
-          runTransaction(db, async transaction => {
-            const snapshot = await transaction.get(profileRef);
-            const profile = { uid: fbUser.uid, displayName: fbUser.displayName || "Usuario", email: fbUser.email || "", photoURL: fbUser.photoURL || "" };
-            if (!snapshot.exists()) transaction.set(profileRef, { ...profile, ecoPoints: 0, level: 1, achievements: [], reportsCount: 0, createdAt: serverTimestamp() });
-            else transaction.set(profileRef, profile, { merge: true });
-          }).catch(() => { /* Authentication remains valid even if profile permissions deny the write. */ });
+          ensureAccount(db, fbUser).catch(() => {
+            setSyncState("error");
+            setSaveError("Has iniciado sesión, pero no se pudo preparar tu perfil en la nube. Revisa tu conexión y los permisos antes de guardar reportes.");
+          });
         }
       } else {
         setUser(null);
@@ -3485,6 +3498,8 @@ export default function App() {
 
   // Load user stats — real-time listener when logged in, localStorage for guests
   useEffect(() => {
+    setUserStats(DEFAULT_STATS);
+    setSyncState("loading");
     if (!user) {
       try {
         const saved = localStorage.getItem("eco_stats_guest");
@@ -3500,14 +3515,20 @@ export default function App() {
       } catch { setUserStats(DEFAULT_STATS); }
       return;
     }
+    if (syncRetry && auth?.currentUser?.uid === user.uid) ensureAccount(db, auth.currentUser).catch(() => setSyncState("error"));
     // Real-time listener — fires immediately on login and on any change from any device
-    const unsub = onSnapshot(
-      doc(db, "users", user.uid),
+    const unsub = watchAccount(db, user.uid,
       (snap) => {
         if (snap.exists()) {
           const data = snap.data();
+          setSyncState(snap.metadata.hasPendingWrites ? "pending" : snap.metadata.fromCache ? "cached" : "synced");
+          setUser(current => current?.uid === user.uid ? { ...current,
+            name: typeof data.displayName === "string" && data.displayName ? data.displayName : current.name,
+            photoUrl: typeof data.photoURL === "string" && data.photoURL ? data.photoURL : current.photoUrl,
+          } : current);
           const points = Number(data.ecoPoints) || 0;
-          const stats: UserStats = { ...DEFAULT_STATS, ...computeLevel(points), points, reports: Number(data.reportsCount) || 0, badges: data.achievements || [] };
+          const shown = displayLevel(points);
+          const stats: UserStats = { ...DEFAULT_STATS, level: shown.level, levelNum: shown.levelNum, points, reports: Number(data.reportsCount) || 0, badges: Array.isArray(data.achievements) ? data.achievements : [] };
           setUserStats(stats);
           try { localStorage.setItem(lsKey, JSON.stringify(stats)); } catch {}
         } else {
@@ -3518,6 +3539,7 @@ export default function App() {
         }
       },
       () => {
+        setSyncState("error");
         setSaveError("No se pudo sincronizar tu progreso con Firebase. Revisa la conexión y los permisos de tu cuenta.");
         try {
           const saved = localStorage.getItem(lsKey);
@@ -3526,27 +3548,39 @@ export default function App() {
       }
     );
     return unsub;
-  }, [user?.uid]);
+  }, [user?.uid, syncRetry]);
 
   // Firestore live reports listener
   useEffect(() => {
     if (!db) return;
-    const q = query(collection(db, "reports"), orderBy("createdAt", "desc"), limit(100));
-    const unsub = onSnapshot(q, snap => {
-      setLiveReports(snap.docs.map(d => {
-        const data = d.data();
-        const ts = data.createdAt?.toDate?.() ?? new Date();
+    setLiveReports([]);
+    setOwnReports([]);
+    if (!user) return;
+    const mapReport = (d: { id: string; data: () => Record<string, unknown> }) => {
+        const data = d.data() as Record<string, unknown>;
+        const mapped = mapCloudReport(d.id, data);
+        const stamp = data.createdAt as { toDate?: () => Date } | undefined;
+        const when = stamp?.toDate?.() || (typeof data.date === "string" ? new Date(data.date) : new Date());
         return {
-          id: d.id, type: data.type === "agua" ? "aguas" : data.type === "otro" ? "otros" : data.type, description: data.description, status: data.status === "revisado" ? "proceso" : data.status || "pendiente",
-          imageUrl: data.imageUrl || null, location: data.location,
-          lat: data.latitude ?? null, lng: data.longitude ?? null,
-          date: ts.toLocaleDateString("es-PE", { day: "2-digit", month: "short", year: "numeric" }),
-          time: ts.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
-          upvotes: data.votes ?? 0, userName: data.userName || "Ciudadano", userPhoto: data.userPhoto || null,
+          id: mapped.id, type: mapped.type as ReportType, description: mapped.description, status: mapped.status as ReportStatus,
+          imageUrl: mapped.imageUrl, location: mapped.location,
+          lat: mapped.lat, lng: mapped.lng,
+          date: when.toLocaleDateString("es-PE", { day: "2-digit", month: "short", year: "numeric" }),
+          time: when.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
+          upvotes: mapped.upvotes, userName: mapped.userName, userPhoto: mapped.userPhoto, userId: mapped.userId,
         } as SubmittedReport;
-      }));
-    }, () => { setSaveError("No se pudieron cargar los reportes compartidos. Inicia sesión y revisa los permisos de Firebase."); });
-    return unsub;
+    };
+    const recent = query(collection(db, "reports"), orderBy("createdAt", "desc"), limit(100));
+    const stopRecent = onSnapshot(recent, snap => setLiveReports(snap.docs.map(mapReport)), () => {
+      setSaveError("No se pudieron cargar los reportes compartidos. Revisa los permisos de Firebase.");
+    });
+    // A user's history must not disappear when the community exceeds 100 reports.
+    const mine = query(collection(db, "reports"), where("userId", "==", user.uid));
+    const stopMine = onSnapshot(mine, snap => {
+      const sorted = [...snap.docs].sort((a, b) => (b.data().createdAt?.toMillis?.() || 0) - (a.data().createdAt?.toMillis?.() || 0));
+      setOwnReports(sorted.map(mapReport));
+    }, () => setSaveError("No se pudo cargar tu historial de reportes. Revisa los permisos de Firebase."));
+    return () => { stopRecent(); stopMine(); };
   }, [user?.uid]);
 
   // Save stats to Firestore + localStorage
@@ -3555,11 +3589,12 @@ export default function App() {
     const lsKey = user ? `eco_stats_${user.uid}` : "eco_stats_guest";
     try { localStorage.setItem(lsKey, JSON.stringify(stats)); } catch {}
     if (!user || !db) return;
-    setDoc(doc(db, "webProfiles", user.uid), { stats }, { merge: true }).catch(() => {});
+    /* puntos viven en users/{uid}; no duplicar en webProfiles */
   };
 
   const handleSignOut = async () => {
-    if (auth) await fbSignOut(auth);
+    try { if (auth) await fbSignOut(auth); }
+    catch { setSaveError("No se pudo cerrar la sesión. Vuelve a intentarlo."); return; }
     setUser(null);
     setUserStats(DEFAULT_STATS);
     setPage("home");
@@ -3569,35 +3604,35 @@ export default function App() {
     if (savingReport) return;
     setSavingReport(true);
     setSaveError("");
+    if (!r.description.trim() || r.description.length > 5000) {
+      setSaveError("La descripción debe tener entre 1 y 5000 caracteres.");
+      setSavingReport(false);
+      return;
+    }
     // Save to Firestore or local
     if (db) {
       try {
         if (!user) throw new Error("Inicia sesión para guardar en la nube");
         let imageUrl = r.imageUrl;
         if (imageUrl?.startsWith("data:")) imageUrl = await compressImage(imageUrl);
-        const reportRef = doc(collection(db, "webReports"));
-        const profileRef = doc(db, "users", user.uid);
-        await runTransaction(db, async transaction => {
-          const profile = await transaction.get(profileRef);
-          if (!profile.exists()) throw new Error("Perfil pendiente de creación");
-          const data = profile.data();
-          const points = (Number(data.ecoPoints) || 0) + 50;
-          const reports = (Number(data.reportsCount) || 0) + 1;
-          transaction.set(reportRef, {
-          type: r.type, description: r.description, imageUrl,
-          location: r.location, lat: r.lat, lng: r.lng,
+        const docs = buildReportDocs({
+          webType: r.type,
+          description: r.description,
+          imageUrl,
+          location: r.location,
+          lat: r.lat,
+          lng: r.lng,
           userId: user.uid,
-          userName: r.userName, userPhoto: r.userPhoto,
-          upvotes: 0, status: "pendiente", timestamp: serverTimestamp(),
-          });
-          transaction.set(doc(db, "reports", reportRef.id), {
-            userId: user.uid, title: r.description.slice(0, 100), description: r.description,
-            type: r.type === "aguas" ? "agua" : ["escombros", "otros"].includes(r.type) ? "otro" : r.type,
-            severity: "media", location: r.location, latitude: r.lat, longitude: r.lng,
-            imageUrl, userName: r.userName, userPhoto: r.userPhoto, status: "pendiente", votes: 0, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-            source: "web", webReportId: reportRef.id,
-          });
-          transaction.update(profileRef, { ecoPoints: points, reportsCount: reports, level: 1 + Math.floor(points / 100), updatedAt: serverTimestamp() });
+          userName: r.userName,
+          userPhoto: r.userPhoto,
+          source: nativePlatform(),
+        }, new Date().toISOString());
+        const draftKey = JSON.stringify([user.uid, r.type, r.description, r.location, r.lat, r.lng, r.imageUrl]);
+        if (reportAttempt.current?.draft !== draftKey) reportAttempt.current = { draft: draftKey, id: doc(collection(db, "reports")).id };
+        const reportRef = doc(db, "reports", reportAttempt.current.id);
+        await saveReportAndProgress(db, user.uid, reportRef.id, docs.report);
+        await setDoc(doc(db, "webReports", reportRef.id), { ...docs.webReport, timestamp: serverTimestamp() }).catch(() => {
+          setSaveError("Reporte y puntos guardados. La copia de compatibilidad no se pudo actualizar; no vuelvas a enviar el reporte.");
         });
       } catch {
         setSaveError(user ? "No se pudo guardar el reporte y su progreso. Comprueba tu conexión y los permisos de Firebase." : "Inicia sesión con Google antes de guardar tu reporte en la nube.");
@@ -3624,6 +3659,7 @@ export default function App() {
     const newBadges = computeBadges({ ...userStats, reports: newReports, points: newPoints, level, levelNum });
     if (!db) await saveStats({ ...userStats, reports: newReports, points: newPoints, level, levelNum, badges: newBadges });
 
+    reportAttempt.current = null;
     setSavingReport(false);
     setPage("community");
   };
@@ -3642,12 +3678,12 @@ export default function App() {
       case "report":       return <ReportPage setPage={setPage} setAnalysisData={setAnalysisData} user={user} />;
       case "analysis":     return <AIAnalysisPage analysisData={analysisData} setPage={setPage} addReport={addReport} user={user} />;
       case "map":          return <MapPage liveReports={liveReports} />;
-      case "alerts":       return <AlertsPage />;
+      case "alerts":       return <AlertsPage key={user?.uid || "guest"} quiz={activity.quiz} onQuiz={activity.act} activityBusy={activity.busy} signedIn={Boolean(user && db)} />;
       case "gamification": return <GamificationPage userStats={userStats} user={user} />;
-      case "education":    return <EducationPage />;
-      case "admin":        return <AdminPage liveReports={liveReports} />;
-      case "community":    return <CommunityPage reports={liveReports} setPage={setPage} currentUser={user} />;
-      case "account":      return <AccountPage user={user} reports={liveReports} userStats={userStats} onSignOut={handleSignOut} onSignIn={() => setShowAuth(true)} setPage={setPage} theme={theme} setTheme={setTheme} />;
+      case "education":    return <EducationPage key={user?.uid || "guest"} readArticles={activity.articles} onRead={activity.markRead} />;
+      case "admin":        return db ? <div className="p-8 text-center">La gestión real requiere permisos de administración. El panel de demostración está disponible en el modo de prueba.</div> : <AdminPage liveReports={liveReports} />;
+      case "community":    return <CommunityPage key={user?.uid || "guest"} reports={liveReports} setPage={setPage} currentUser={user} />;
+      case "account":      return <AccountPage key={user?.uid || "guest"} onProfileChanged={setUser} user={user} reports={db ? ownReports : liveReports} userStats={userStats} onSignOut={handleSignOut} onSignIn={() => setShowAuth(true)} setPage={setPage} theme={theme} setTheme={setTheme} />;
     }
   };
 
@@ -3655,6 +3691,10 @@ export default function App() {
     <div className="min-h-screen bg-background text-foreground">
       {!FIREBASE_READY && <div className="bg-primary/10 text-primary text-center px-4 py-2 text-xs" role="status">Modo de prueba local · Tus reportes se guardan solo en este navegador.</div>}
       <Navbar currentPage={page} setPage={setPage} user={user} onSignIn={() => setShowAuth(true)} />
+      {user && db && <div role="status" aria-live="polite" className="px-4 py-2 text-xs text-center border-b border-border bg-card" data-testid="cloud-sync">
+        {!online ? "Sin conexión · Los cambios nuevos necesitan internet" : syncState === "synced" ? "Puntos y perfil confirmados en la nube · Misma cuenta en web y apps" : syncState === "pending" ? "Guardando progreso en la nube…" : syncState === "cached" ? "Mostrando copia local · Esperando confirmación de la nube" : syncState === "error" ? "No se pudo sincronizar el progreso" : "Conectando tu progreso…"}
+        {syncState === "error" && <button className="underline ml-3" onClick={() => { setSaveError(""); setSyncRetry(n => n + 1); }}>Reintentar</button>}
+      </div>}
       <motion.main id="contenido" key={page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
         {renderPage()}
       </motion.main>

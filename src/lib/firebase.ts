@@ -1,5 +1,6 @@
 import { initializeApp, getApps } from "firebase/app";
-import { getAuth, GoogleAuthProvider } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, initializeAuth, indexedDBLocalPersistence } from "firebase/auth";
+import { Capacitor } from "@capacitor/core";
 import { getFirestore } from "firebase/firestore";
 
 export const config = {
@@ -18,7 +19,9 @@ const app = FIREBASE_READY
   ? (getApps().length ? getApps()[0] : initializeApp(config))
   : null;
 
-export const auth = app ? getAuth(app) : null;
+export const auth = app ? (Capacitor.isNativePlatform()
+  ? initializeAuth(app, { persistence: indexedDBLocalPersistence })
+  : getAuth(app)) : null;
 export const db = app ? getFirestore(app) : null;
 
 export const googleProvider = new GoogleAuthProvider();
